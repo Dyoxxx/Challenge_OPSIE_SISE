@@ -1,0 +1,16 @@
+services:
+  opsie-app:
+    build:
+      context: .
+      dockerfile: dockerfile
+    image: opsie-app:latest
+    container_name: opsie-app
+    ports:
+      - "${HOST_PORT:-8501}:8501"
+    environment:
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_SERVER_PORT=8501
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY:?MISTRAL_API_KEY is required}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped  

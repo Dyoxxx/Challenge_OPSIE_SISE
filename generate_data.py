@@ -48,9 +48,9 @@ df = pd.DataFrame({
     "interface_out": "eth1",
 })
 
-df.to_parquet("data/logs_export.parquet", index=False)
-print(f"✅ {len(df):,} lignes générées → data/logs_export.parquet")
-print(f"\nAperçu :")
+df.to_csv("data/logs_export.csv", index=False)
+print(f"✅ {len(df):,} lignes générées → data/logs_export.csv")
+print("\nAperçu :")
 print(df.head(10).to_string())
 print(f"\nDistribution actions : {dict(df['action'].value_counts())}")
 print(f"Règles : {dict(df['rule'].value_counts())}")

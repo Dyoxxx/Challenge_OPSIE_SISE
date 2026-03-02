@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import streamlit as st
+from pathlib import Path
 
 # ══════════════════════════════════════════════════════
 # PALETTE NASA / MISSION CONTROL
@@ -37,6 +38,7 @@ JOUR_ORDER = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sun
 JOUR_FR    = {"Monday":"Lundi","Tuesday":"Mardi","Wednesday":"Mercredi",
               "Thursday":"Jeudi","Friday":"Vendredi","Saturday":"Samedi","Sunday":"Dimanche"}
 
+
 # ══════════════════════════════════════════════════════
 # PLOTLY THEME
 # ══════════════════════════════════════════════════════
@@ -60,6 +62,7 @@ def plotly_layout(height=360, title=""):
             outlinecolor=C_BORDER, outlinewidth=1,
         )),
     )
+
 
 # ══════════════════════════════════════════════════════
 # GLOBAL CSS — NASA MISSION CONTROL
@@ -344,13 +347,70 @@ hr { border: none !important; border-top: 1px solid var(--b1) !important; }
 </style>
 """
 
+
+# ══════════════════════════════════════════════════════
+# UTILS — Anti LargeUtf8 / Arrow types
+# ══════════════════════════════════════════════════════
+def _force_no_pyarrow_strings(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Streamlit peut planter sur certains dtypes pyarrow (LargeUtf8).
+    On convertit les colonnes string[pyarrow] en strings Python (object).
+    """
+    df = df.copy()
+
+    # Convert dtypes backend -> numpy (enlève beaucoup de types pyarrow)
+    try:
+        df = df.convert_dtypes(dtype_backend="numpy_nullable")
+    except Exception:
+        pass
+
+    # Convertir explicitement les colonnes string en object(str)
+    for c in df.columns:
+        s = df[c]
+        try:
+            if pd.api.types.is_string_dtype(s) or s.dtype == "object":
+                # astype(str) force python string => évite LargeUtf8
+                df[c] = s.astype(str)
+        except Exception:
+            # fallback safe
+            df[c] = s.astype(str)
+
+    # datetimes -> garder datetime côté calcul, mais date_jour en string pour affichage
+    if "date_jour" in df.columns:
+        df["date_jour"] = df["date_jour"].astype(str)
+
+    return df
+
+
 # ══════════════════════════════════════════════════════
 # DATA LOADING
 # ══════════════════════════════════════════════════════
 @st.cache_data
 def load_data():
+    data_path = "data/logs_export.csv"
+
+    def _read_logs_dataframe(path: str) -> pd.DataFrame:
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(path)
+
+        head = p.read_bytes()[:4]
+        if head == b"PAR1":
+            return pd.read_parquet(path)
+
+        try:
+            return pd.read_csv(path)
+        except UnicodeDecodeError:
+            return pd.read_parquet(path)
+
     try:
-        df = pd.read_parquet("data/logs_export.parquet")
+        try:
+            df = _read_logs_dataframe(data_path)
+        except Exception:
+            return _demo_data(), True
+
+        # ✅ IMPORTANT : supprime LargeUtf8 tout de suite
+        df = _force_no_pyarrow_strings(df)
 
         col_map = {}
         cols_l = {c.lower().strip(): c for c in df.columns}
@@ -375,14 +435,17 @@ def load_data():
         # Nettoyer colonnes parasites (FW=6, \n)
         for col in list(df.columns):
             if col not in list(mapping.keys()):
-                uniq = set(df[col].astype(str).str.strip().unique())
-                if uniq.issubset({"6","\\n","\n","","nan"}):
-                    df.drop(columns=[col], inplace=True)
+                try:
+                    uniq = set(df[col].astype(str).str.strip().unique())
+                    if uniq.issubset({"6","\\n","\n","","nan"}):
+                        df.drop(columns=[col], inplace=True)
+                except Exception:
+                    pass
 
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-            df = df[(df["timestamp"] >= "2025-11-01") & (df["timestamp"] <= "2026-02-28")]
-            df["date_jour"]    = df["timestamp"].dt.date
+            df = df[(df["timestamp"] >= "2025-11-01") & (df["timestamp"] < "2026-03-01")]
+            df["date_jour"]    = df["timestamp"].dt.date.astype(str)  # ✅ string
             df["heure"]        = df["timestamp"].dt.hour
             df["mois"]         = df["timestamp"].dt.to_period("M").astype(str)
             df["jour_semaine"] = df["timestamp"].dt.day_name()
@@ -398,15 +461,24 @@ def load_data():
             if p in ("ICMP","1"): return "ICMP"
             port = row.get("dport")
             if pd.notna(port):
-                if int(port) in TCP_PORTS: return "TCP"
-                if int(port) in UDP_PORTS: return "UDP"
+                try:
+                    port = int(port)
+                    if port in TCP_PORTS: return "TCP"
+                    if port in UDP_PORTS: return "UDP"
+                except Exception:
+                    pass
             return "TCP"
+
         df["PROTO"] = df.apply(deduce_proto, axis=1)
+
+        # ✅ Re-check anti LargeUtf8 après transformations
+        df = _force_no_pyarrow_strings(df)
 
         return df, False  # (data, is_demo)
 
     except FileNotFoundError:
         return _demo_data(), True
+
 
 def _demo_data():
     np.random.seed(42)
@@ -429,10 +501,8 @@ def _demo_data():
     actions = np.random.choice(["DENY","PERMIT"], n, p=[.62,.38])
 
     dates = pd.date_range("2025-11-01","2026-02-28", periods=n)
-    dates = pd.Series(dates)  
-    # Simuler des pics d'attaque
-    spike_mask = (dates.month == 12) & (dates.day.isin([range(10,15)])) 
-    
+    dates = pd.Series(dates)
+
     df = pd.DataFrame({
         "timestamp":     dates,
         "src_ip":        np.random.choice(src_ips, n),
@@ -444,78 +514,61 @@ def _demo_data():
         "interface_in":  "eth0",
         "interface_out": "eth1",
     })
-    df["date_jour"]    = df["timestamp"].dt.date
-    df["heure"]        = df["timestamp"].dt.hour
-    df["mois"]         = df["timestamp"].dt.to_period("M").astype(str)
-    df["jour_semaine"] = df["timestamp"].dt.day_name()
-    df["dport"]        = df["dport"].astype(float)
-    df["port_nom"]     = df["dport"].map(PORT_NAMES).fillna(df["dport"].astype(str))
-    df["PROTO"]        = protos
+
+    df["timestamp"]     = pd.to_datetime(df["timestamp"], errors="coerce")
+    df["date_jour"]     = df["timestamp"].dt.date.astype(str)  # ✅ string
+    df["heure"]         = df["timestamp"].dt.hour
+    df["mois"]          = df["timestamp"].dt.to_period("M").astype(str)
+    df["jour_semaine"]  = df["timestamp"].dt.day_name()
+    df["dport"]         = pd.to_numeric(df["dport"], errors="coerce")
+    df["port_nom"]      = df["dport"].map(PORT_NAMES).fillna(df["dport"].astype(str))
+    df["PROTO"]         = protos
+
+    # ✅ anti LargeUtf8
+    df = _force_no_pyarrow_strings(df)
     return df
 
 
 def render_sidebar(active="accueil"):
     """Sidebar commune."""
     with st.sidebar:
-        st.markdown("""
-        <div class="sidebar-logo">
-            <span class="logo-icon">🛡️</span>
-            <div class="logo-title">FW · ANALYTICS</div>
-            <div class="logo-sub">SISE-OPSIE · 2026</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        page = st.radio(
-            "", ["🏠  ACCUEIL", "📊  ANALYSES"],
-            index=0 if active=="accueil" else 1,
-            #label_visibility="collapsed"
-        )
-
+        page = active
         st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
         st.markdown('<div class="section-label">FILTRES OPÉRATIONNELS</div>', unsafe_allow_html=True)
 
         df_raw, is_demo = load_data()
 
         mois_dispo = sorted(df_raw["mois"].dropna().unique()) if "mois" in df_raw.columns else []
-        mois_sel   = st.multiselect("PÉRIODE", mois_dispo, default=mois_dispo, key="f_mois")
+        mois_sel   = st.multiselect("PÉRIODE", mois_dispo, default=[], key=f"f_mois_{active}")
 
         action_dispo = df_raw["action"].dropna().unique().tolist() if "action" in df_raw.columns else []
-        action_sel   = st.multiselect("ACTION", action_dispo, default=action_dispo, key="f_action")
+        action_sel   = st.multiselect("ACTION", action_dispo, default=[], key=f"f_action_{active}")
 
         proto_dispo = df_raw["PROTO"].dropna().unique().tolist() if "PROTO" in df_raw.columns else []
-        proto_sel   = st.multiselect("PROTOCOLE", proto_dispo, default=proto_dispo, key="f_proto")
+        proto_sel   = st.multiselect("PROTOCOLE", proto_dispo, default=[], key=f"f_proto_{active}")
 
-        st.markdown('<div class="section-label" style="margin-top:12px">PLAGE PORTS · RFC 6056</div>', unsafe_allow_html=True)
-        port_range = st.slider("", 0, 65535, (0, 65535), key="f_port", label_visibility="collapsed")
+        port_range = st.slider("", 0, 65535, (0, 65535), key=f"f_port_{active}", label_visibility="collapsed")
 
         rules_dispo = sorted(df_raw["rule"].dropna().unique().tolist()) if "rule" in df_raw.columns else []
-        rules_sel   = st.multiselect("RÈGLES ACTIVES", rules_dispo, default=rules_dispo, key="f_rules")
+        rules_sel   = st.multiselect("RÈGLES ACTIVES", rules_dispo, default=[], key=f"f_rules_{active}")
 
-        st.markdown('<div class="section-label" style="margin-top:12px">AFFICHAGE</div>', unsafe_allow_html=True)
-        top_n = st.slider("TOP N", 5, 30, 15, key="f_topn", label_visibility="collapsed")
-
-        # Status système
-        st.markdown(f"""
-        <div style="margin-top:20px; padding:12px; background:rgba(0,230,118,0.05);
-                    border:1px solid rgba(0,230,118,0.2); border-radius:3px;">
-            <div style="font-family:'Share Tech Mono',monospace; font-size:0.6rem;
-                        color:#3a6080; letter-spacing:2px; margin-bottom:6px;">SYSTÈME STATUS</div>
-            <div style="font-family:'Share Tech Mono',monospace; font-size:0.72rem; color:#00e676;">
-                ● ONLINE<br>
-                <span style="color:#3a6080">MODE: {'DEMO' if is_demo else 'LIVE'}</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        top_n = st.slider("TOP N", 5, 30, 15, key=f"f_topn_{active}", label_visibility="collapsed")
 
         return page, mois_sel, action_sel, proto_sel, port_range, rules_sel, top_n
 
 
 def apply_filters(df_raw, mois_sel, action_sel, proto_sel, port_range, rules_sel):
     df = df_raw.copy()
-    if mois_sel   and "mois"   in df.columns: df = df[df["mois"].isin(mois_sel)]
-    if action_sel and "action" in df.columns: df = df[df["action"].isin(action_sel)]
-    if proto_sel  and "PROTO"  in df.columns: df = df[df["PROTO"].isin(proto_sel)]
-    if "dport"    in df.columns:
+
+    if mois_sel:
+        df = df[df["mois"].isin(mois_sel)]
+    if action_sel:
+        df = df[df["action"].isin(action_sel)]
+    if proto_sel:
+        df = df[df["PROTO"].isin(proto_sel)]
+    if port_range and "dport" in df.columns:
         df = df[(df["dport"] >= port_range[0]) & (df["dport"] <= port_range[1])]
-    if rules_sel  and "rule"   in df.columns: df = df[df["rule"].isin(rules_sel)]
-    return df  
+    if rules_sel:
+        df = df[df["rule"].isin(rules_sel)]
+
+    return df

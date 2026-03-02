@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Firewall Logs Dashboard", layout="wide")
 
-st.title("📊 Firewall Logs Dashboard")
+st.title("Challenge OPSIE SISE - Analyse de données de pare-feu")
 
 # Upload CSV
 uploaded_file = st.file_uploader("Upload firewall CSV file", type=["csv"])

@@ -14,7 +14,7 @@ from sklearn.metrics import silhouette_score
 
 from config import (
     NASA_CSS, plotly_layout,
-    C_CYAN, C_CYAN_DIM, C_MUTED, C_BORDER2,
+    C_CYAN, C_MUTED, C_BORDER2,
     PORT_NAMES,
     load_data, apply_filters, render_sidebar
 )
@@ -45,6 +45,68 @@ def header():
 
 def _safe_cols(df, cols):
     return [c for c in cols if c in df.columns]
+
+
+def _prepare_features_all_variables(df_ml: pd.DataFrame, max_onehot_cardinality: int = 25):
+    work = df_ml.copy()
+
+    technical_drop = {"cluster", "pc1", "pc2"}
+    keep_cols = [c for c in work.columns if c not in technical_drop]
+    work = work[keep_cols]
+
+    for col in work.columns:
+        if pd.api.types.is_datetime64_any_dtype(work[col]):
+            work[col] = work[col].view("int64") / 1e9
+
+    num_cols = work.select_dtypes(include=[np.number, "bool"]).columns.tolist()
+    cat_cols = [c for c in work.columns if c not in num_cols]
+
+    for col in num_cols:
+        if pd.api.types.is_bool_dtype(work[col]):
+            work[col] = work[col].astype(int)
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+        med = work[col].median()
+        work[col] = work[col].fillna(0 if pd.isna(med) else med)
+
+    low_card_cols = []
+    high_card_cols = []
+    for col in cat_cols:
+        s = work[col].astype(str).fillna("NA")
+        work[col] = s
+        n_unique = int(s.nunique(dropna=False))
+        if n_unique <= max_onehot_cardinality:
+            low_card_cols.append(col)
+        else:
+            high_card_cols.append(col)
+
+    for col in high_card_cols:
+        freq = work[col].value_counts(normalize=True, dropna=False)
+        new_col = f"freq__{col}"
+        work[new_col] = work[col].map(freq).astype(float).fillna(0.0)
+
+    numeric_final = num_cols + [f"freq__{c}" for c in high_card_cols]
+    categorical_final = low_card_cols
+
+    transformers = []
+    if numeric_final:
+        transformers.append(("num", StandardScaler(), numeric_final))
+    if categorical_final:
+        transformers.append(("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), categorical_final))
+
+    if not transformers:
+        return None, None
+
+    pre = ColumnTransformer(transformers=transformers, remainder="drop")
+    X = pre.fit_transform(work)
+
+    meta = {
+        "n_input_cols": int(len(keep_cols)),
+        "n_num_cols": int(len(num_cols)),
+        "n_low_card_cat_cols": int(len(low_card_cols)),
+        "n_high_card_cat_cols": int(len(high_card_cols)),
+        "high_card_cols": high_card_cols,
+    }
+    return X, meta
 
 
 def _df_for_display(df: pd.DataFrame) -> pd.DataFrame:
@@ -188,7 +250,8 @@ def main():
     st.write(
         "Créer une **typologie automatique** des événements firewall (profils homogènes). "
         "ACP = projection 2D (lecture visuelle), KMeans = segmentation. "
-        "**action** sert uniquement à interpréter le niveau de risque des clusters."
+        "Le pipeline ML utilise **toutes les variables exploitables** : numériques + catégorielles "
+        "(encodage one-hot pour faible cardinalité, fréquence pour forte cardinalité)."
     )
 
     c1, c2, c3 = st.columns(3)
@@ -206,22 +269,10 @@ def main():
 
     df_ml = df.sample(n=min(int(sample_n), len(df)), random_state=int(random_state)).copy()
 
-    num_cols = _safe_cols(df_ml, ["dport", "heure", "rule"])
-    cat_cols = _safe_cols(df_ml, ["PROTO", "jour_semaine"])
-
-    if not num_cols and not cat_cols:
-        st.error("Aucune colonne exploitable (dport/heure/rule/PROTO/jour_semaine).")
+    X, feat_meta = _prepare_features_all_variables(df_ml)
+    if X is None or feat_meta is None:
+        st.error("Aucune variable exploitable pour ACP/KMeans après prétraitement.")
         return
-
-    pre = ColumnTransformer(
-        transformers=[
-            ("num", StandardScaler(), num_cols) if num_cols else ("num", "drop", []),
-            ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), cat_cols) if cat_cols else ("cat", "drop", []),
-        ],
-        remainder="drop",
-    )
-
-    X = pre.fit_transform(df_ml)
 
     pca = PCA(n_components=2, random_state=int(random_state))
     X2 = pca.fit_transform(X)
@@ -248,6 +299,12 @@ def main():
     var_exp = float(pca.explained_variance_ratio_.sum())
     cB.metric("VAR EXPLIQUÉE (PC1+PC2)", f"{(var_exp*100):.1f}%")
     cC.metric("SILHOUETTE", f"{sil:.3f}" if sil is not None else "—")
+
+    st.caption(
+        f"Variables utilisées: {feat_meta['n_input_cols']} colonnes brutes · "
+        f"num={feat_meta['n_num_cols']} · cat faible={feat_meta['n_low_card_cat_cols']} · "
+        f"cat forte={feat_meta['n_high_card_cat_cols']} (encodage fréquence)"
+    )
 
     st.markdown('<div class="section-label">ACP · PROJECTION 2D + CLUSTERS</div>', unsafe_allow_html=True)
     fig = go.Figure()

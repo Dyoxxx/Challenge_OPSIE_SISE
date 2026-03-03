@@ -493,6 +493,206 @@ def section_top_ip_ports(df: pd.DataFrame, top_n: int, n_total: int):
             })
 
 
+def section_ports_entrants_journee(df: pd.DataFrame, top_n: int, n_total: int):
+    st.markdown('<div class="section-label">PORTS ENTRANTS · 06H–22H (FILTRES)</div>',
+                unsafe_allow_html=True)
+
+    needed = {"heure", "dport"}
+    if not needed.issubset(df.columns) or not n_total:
+        st.info("Colonnes nécessaires: heure + dport")
+        return
+
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        h_start = st.slider("Heure début", 0, 23, 22, 1, key="in_ports_h_start")
+    with f2:
+        h_end = st.slider("Heure fin", 0, 23, 6, 1, key="in_ports_h_end")
+    with f3:
+        action_opts = sorted(df["action"].dropna().unique().tolist()) if "action" in df.columns else []
+        act_sel = st.multiselect("Action (local)", action_opts, default=[], key="in_ports_action")
+    with f4:
+        proto_opts = sorted(df["PROTO"].dropna().unique().tolist()) if "PROTO" in df.columns else []
+        proto_sel_local = st.multiselect("Protocole (local)", proto_opts, default=[], key="in_ports_proto")
+
+    sub = df.copy()
+    sub["heure"] = pd.to_numeric(sub["heure"], errors="coerce")
+    sub["dport"] = pd.to_numeric(sub["dport"], errors="coerce")
+    sub = sub.dropna(subset=["heure", "dport"])
+
+    # Accepte aussi les plages qui traversent minuit, ex: 22h -> 6h
+    if h_start <= h_end:
+        hour_mask = (sub["heure"] >= h_start) & (sub["heure"] <= h_end)
+    else:
+        hour_mask = (sub["heure"] >= h_start) | (sub["heure"] <= h_end)
+    sub = sub[hour_mask]
+
+    if act_sel and "action" in sub.columns:
+        sub = sub[sub["action"].isin(act_sel)]
+    if proto_sel_local and "PROTO" in sub.columns:
+        sub = sub[sub["PROTO"].isin(proto_sel_local)]
+
+    if len(sub) == 0:
+        st.info("Aucune donnée sur cette plage horaire avec ces filtres.")
+        return
+
+    c1, c2 = st.columns([2, 2])
+
+    with c1:
+        by_hour = sub.groupby("heure").size().reset_index(name="events").sort_values("heure")
+        fig = go.Figure(go.Scatter(
+            x=by_hour["heure"],
+            y=by_hour["events"],
+            mode="lines+markers",
+            line=dict(color=C_CYAN, width=2),
+            marker=dict(size=6, color=C_CYAN),
+            hovertemplate="Heure: %{x:.0f}h<br>Événements: %{y:,}<extra></extra>",
+            name="Events",
+        ))
+        lo = plotly_layout(height=320)
+        lo["xaxis"]["title"] = "Heure"
+        lo["yaxis"]["title"] = "Nombre d'événements"
+        lo["xaxis"]["tickmode"] = "linear"
+        lo["xaxis"]["dtick"] = 1
+        fig.update_layout(**lo)
+        st.plotly_chart(fig, use_container_width=True)
+
+    with c2:
+        top_ports = (
+            sub.groupby("dport").size().reset_index(name="events")
+               .sort_values("events", ascending=False)
+               .head(max(int(top_n), 15))
+               .copy()
+        )
+        top_ports["port"] = top_ports["dport"].astype(int)
+        top_ports["service"] = top_ports["port"].map(PORT_NAMES).fillna("UNKNOWN")
+        top_ports["part_%"] = (top_ports["events"] / max(1, len(sub)) * 100).round(2)
+
+        st.dataframe(
+            df_for_display(top_ports[["port", "service", "events", "part_%"]]),
+            use_container_width=True,
+            height=320,
+        )
+
+    c3, c4 = st.columns([2, 2])
+
+    with c3:
+        st.markdown('<div class="section-label">LISTE IP · SUR PLAGE HORAIRE</div>', unsafe_allow_html=True)
+        if "src_ip" in sub.columns:
+            ip_base = sub.groupby("src_ip").size().reset_index(name="events")
+
+            if "action" in sub.columns:
+                ip_base["deny"] = (
+                    sub[sub["action"] == "DENY"]
+                    .groupby("src_ip")
+                    .size()
+                    .reindex(ip_base["src_ip"], fill_value=0)
+                    .values
+                )
+                ip_base["permit"] = (
+                    sub[sub["action"] == "PERMIT"]
+                    .groupby("src_ip")
+                    .size()
+                    .reindex(ip_base["src_ip"], fill_value=0)
+                    .values
+                )
+            else:
+                ip_base["deny"] = 0
+                ip_base["permit"] = 0
+
+            ports_by_ip = (
+                sub.groupby("src_ip")["dport"]
+                   .apply(lambda s: ", ".join(
+                       [
+                           f"{int(p)}({PORT_NAMES.get(int(p), 'UNKNOWN')})"
+                           for p in s.dropna().astype(float).astype(int).value_counts().head(8).index.tolist()
+                       ]
+                   ))
+                   .to_dict()
+            )
+
+            top_ips = ip_base.copy()
+            top_ips["deny_%"] = (top_ips["deny"] / top_ips["events"].replace(0, np.nan) * 100).fillna(0).round(1)
+            top_ips["ports_ciblés"] = top_ips["src_ip"].map(ports_by_ip).fillna("—")
+            top_ips["part_%"] = (top_ips["events"] / max(1, len(sub)) * 100).round(2)
+            top_ips = top_ips.sort_values(["events", "deny"], ascending=[False, False]).head(max(int(top_n), 20)).copy()
+
+            st.dataframe(
+                df_for_display(top_ips[["src_ip", "events", "deny", "permit", "deny_%", "ports_ciblés", "part_%"]]),
+                use_container_width=True,
+                height=300,
+            )
+        else:
+            top_ips = pd.DataFrame()
+            st.info("Colonne src_ip manquante.")
+
+    with c4:
+        st.markdown('<div class="section-label">COURBE UDP/TCP · 22H–06H</div>', unsafe_allow_html=True)
+        if {"heure", "PROTO"}.issubset(df.columns):
+            night = df.copy()
+            if act_sel and "action" in night.columns:
+                night = night[night["action"].isin(act_sel)]
+            if proto_sel_local and "PROTO" in night.columns:
+                night = night[night["PROTO"].isin(proto_sel_local)]
+
+            night["heure"] = pd.to_numeric(night["heure"], errors="coerce")
+            night = night.dropna(subset=["heure"])
+
+            if h_start <= h_end:
+                night_mask = (night["heure"] >= h_start) & (night["heure"] <= h_end)
+            else:
+                night_mask = (night["heure"] >= h_start) | (night["heure"] <= h_end)
+            night = night[night_mask]
+
+            if len(night) > 0:
+                night_agg = (
+                    night[night["PROTO"].isin(["TCP", "UDP"])]
+                    .groupby(["heure", "PROTO"]).size()
+                    .reset_index(name="events")
+                )
+
+                fig_n = go.Figure()
+                for proto_name, color in [("TCP", C_CYAN), ("UDP", C_GREEN)]:
+                    g = night_agg[night_agg["PROTO"] == proto_name].sort_values("heure")
+                    fig_n.add_trace(go.Scatter(
+                        x=g["heure"],
+                        y=g["events"],
+                        mode="lines+markers",
+                        name=proto_name,
+                        line=dict(width=2, color=color),
+                        marker=dict(size=6, color=color),
+                        hovertemplate="Heure: %{x:.0f}h<br>Proto: " + proto_name + "<br>Événements: %{y:,}<extra></extra>",
+                    ))
+
+                lo_n = plotly_layout(height=300)
+                lo_n["xaxis"]["title"] = "Heure"
+                lo_n["yaxis"]["title"] = "Événements"
+                lo_n["xaxis"]["tickmode"] = "linear"
+                lo_n["xaxis"]["dtick"] = 1
+                fig_n.update_layout(**lo_n)
+                st.plotly_chart(fig_n, use_container_width=True)
+            else:
+                st.info("Aucune donnée sur la plage horaire sélectionnée.")
+        else:
+            st.info("Colonnes nécessaires: heure + PROTO")
+
+    register_chart("Ports entrants 6h-22h", {
+        "plage_horaire": f"{h_start}h-{h_end}h",
+        "n_events": int(len(sub)),
+        "actions": act_sel if act_sel else "ALL",
+        "protocoles": proto_sel_local if proto_sel_local else "ALL",
+        "top_ips": (
+            sub.groupby("src_ip").size().reset_index(name="events")
+               .sort_values("events", ascending=False)
+               .head(10).to_dict(orient="records")
+        ) if "src_ip" in sub.columns else [],
+        "top_ports": (
+            sub.groupby("dport").size().reset_index(name="events")
+               .sort_values("events", ascending=False)
+               .head(10).to_dict(orient="records")
+        ),
+    })
+
+
 def section_heatmap_heure_jour(df: pd.DataFrame, n_total: int):
     st.markdown('<div class="section-label">HEATMAP · ACTIVITÉ PAR HEURE & JOUR</div>',
                 unsafe_allow_html=True)
@@ -822,7 +1022,407 @@ def section_cartes(df: pd.DataFrame, top_n: int, n_total: int):
         else:
             st.info("Pas de données DENY disponibles.")
 
-    
+
+
+SENSITIVE_PORTS = {22, 23, 25, 53, 110, 143, 445, 1433, 3306, 3389, 5432, 6379}
+
+
+def _resolve_event_time(df: pd.DataFrame) -> pd.Series:
+    if "timestamp" in df.columns:
+        ts = pd.to_datetime(df["timestamp"], errors="coerce")
+        if ts.notna().any():
+            return ts
+
+    date_part = pd.to_datetime(df.get("date_jour", pd.Series(index=df.index)), errors="coerce")
+    hour_part = pd.to_numeric(df.get("heure", pd.Series(index=df.index)), errors="coerce").fillna(0)
+    return date_part + pd.to_timedelta(hour_part.astype(int), unit="h")
+
+
+def compute_soc_risk_scores(df: pd.DataFrame) -> pd.DataFrame:
+    if "src_ip" not in df.columns or len(df) == 0:
+        return pd.DataFrame()
+
+    work = df.copy()
+    work["is_deny"] = (work["action"] == "DENY").astype(int) if "action" in work.columns else 0
+    work["is_sensitive_port"] = (
+        pd.to_numeric(work.get("dport", pd.Series(index=work.index)), errors="coerce")
+        .isin(SENSITIVE_PORTS)
+        .astype(int)
+    )
+
+    if "heure" in work.columns:
+        h = pd.to_numeric(work["heure"], errors="coerce").fillna(-1)
+        work["is_night"] = h.between(0, 6).astype(int)
+    else:
+        work["is_night"] = 0
+
+    event_time = _resolve_event_time(work)
+    work["event_time"] = event_time
+
+    ip_agg = (
+        work.groupby("src_ip", as_index=False)
+            .agg(
+                events=("src_ip", "size"),
+                deny=("is_deny", "sum"),
+                sensitive_hits=("is_sensitive_port", "sum"),
+                night_hits=("is_night", "sum"),
+                uniq_ports=("dport", "nunique") if "dport" in work.columns else ("src_ip", "size"),
+                first_seen=("event_time", "min"),
+            )
+    )
+    if "dport" not in work.columns:
+        ip_agg["uniq_ports"] = 0
+
+    ip_agg["deny_rate"] = np.where(ip_agg["events"] > 0, ip_agg["deny"] / ip_agg["events"], 0)
+    ip_agg["sensitive_rate"] = np.where(ip_agg["events"] > 0, ip_agg["sensitive_hits"] / ip_agg["events"], 0)
+    ip_agg["night_rate"] = np.where(ip_agg["events"] > 0, ip_agg["night_hits"] / ip_agg["events"], 0)
+
+    max_dt = event_time.max()
+    if pd.notna(max_dt):
+        ip_agg["is_new_ip"] = ((max_dt - ip_agg["first_seen"]).dt.days <= 7).astype(int)
+    else:
+        ip_agg["is_new_ip"] = 0
+
+    ip_agg["risk_score"] = (
+        40 * ip_agg["deny_rate"]
+        + 22 * np.clip(ip_agg["sensitive_rate"] * 2.2, 0, 1)
+        + 16 * np.clip(ip_agg["uniq_ports"] / 20, 0, 1)
+        + 12 * np.clip(ip_agg["night_rate"] * 2, 0, 1)
+        + 10 * ip_agg["is_new_ip"]
+    ) * 1.0
+    ip_agg["risk_score"] = ip_agg["risk_score"].clip(0, 100).round(1)
+
+    ip_agg["severity"] = pd.cut(
+        ip_agg["risk_score"],
+        bins=[-1, 35, 60, 80, 100],
+        labels=["LOW", "MEDIUM", "HIGH", "CRITICAL"],
+    ).astype(str)
+
+    out = ip_agg.sort_values(["risk_score", "deny", "events"], ascending=[False, False, False]).reset_index(drop=True)
+    return out
+
+
+def section_soc_risk_unified(df: pd.DataFrame, top_n: int):
+    st.markdown('<div class="section-label">SCORE DE RISQUE SOC UNIFIÉ · PAR IP</div>', unsafe_allow_html=True)
+    soc = compute_soc_risk_scores(df)
+    if len(soc) == 0:
+        st.info("Données insuffisantes pour calculer le score SOC.")
+        return soc
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("IP SCORÉES", f"{len(soc):,}")
+    c2.metric("SCORE MOYEN", f"{soc['risk_score'].mean():.1f}")
+    c3.metric("HIGH/CRITICAL", f"{int((soc['risk_score'] >= 60).sum()):,}")
+    c4.metric("TOP RISK IP", str(soc.iloc[0]["src_ip"]) if len(soc) else "—")
+
+    top_soc = soc.head(max(int(top_n), 12)).copy()
+    fig = go.Figure(go.Bar(
+        x=top_soc["risk_score"],
+        y=top_soc["src_ip"],
+        orientation="h",
+        marker=dict(color=top_soc["risk_score"], colorscale="Turbo", cmin=0, cmax=100),
+        customdata=np.stack([top_soc["deny"], top_soc["events"], top_soc["severity"]], axis=-1),
+        hovertemplate=(
+            "IP: %{y}<br>Score: %{x:.1f}<br>DENY: %{customdata[0]:,}/%{customdata[1]:,}"
+            "<br>Sévérité: %{customdata[2]}<extra></extra>"
+        ),
+    ))
+    lo = plotly_layout(height=360)
+    lo["yaxis"]["autorange"] = "reversed"
+    lo["xaxis"]["range"] = [0, 100]
+    fig.update_layout(**lo)
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.dataframe(
+        df_for_display(top_soc[["src_ip", "risk_score", "severity", "events", "deny", "deny_rate", "uniq_ports", "sensitive_hits"]]),
+        use_container_width=True,
+        height=280,
+    )
+
+    register_chart("Score SOC unifié", {
+        "n_ips": int(len(soc)),
+        "score_moyen": round(float(soc["risk_score"].mean()), 1),
+        "high_critical": int((soc["risk_score"] >= 60).sum()),
+        "top10": soc.head(10)[["src_ip", "risk_score", "severity", "deny", "events"]].to_dict(orient="records"),
+    })
+    return soc
+
+
+def compute_ip_anomalies(df: pd.DataFrame) -> pd.DataFrame:
+    if len(df) == 0 or "src_ip" not in df.columns:
+        return pd.DataFrame()
+
+    work = df.copy()
+    work["event_time"] = _resolve_event_time(work)
+    work = work.dropna(subset=["event_time"])
+    if len(work) == 0:
+        return pd.DataFrame()
+
+    work["hour_slot"] = work["event_time"].dt.floor("h")
+    work["is_deny"] = (work["action"] == "DENY").astype(int) if "action" in work.columns else 0
+    work["is_sensitive_port"] = pd.to_numeric(work.get("dport", pd.Series(index=work.index)), errors="coerce").isin(SENSITIVE_PORTS).astype(int)
+
+    hourly = (
+        work.groupby(["src_ip", "hour_slot"], as_index=False)
+            .agg(
+                events=("src_ip", "size"),
+                deny=("is_deny", "sum"),
+                sensitive=("is_sensitive_port", "sum"),
+                uniq_ports=("dport", "nunique") if "dport" in work.columns else ("src_ip", "size"),
+            )
+    )
+    if "dport" not in work.columns:
+        hourly["uniq_ports"] = 0
+    hourly["deny_rate"] = np.where(hourly["events"] > 0, hourly["deny"] / hourly["events"], 0)
+
+    latest_slot = hourly["hour_slot"].max()
+    current = hourly[hourly["hour_slot"] == latest_slot].copy()
+    if len(current) == 0:
+        return pd.DataFrame()
+
+    baseline = hourly[hourly["hour_slot"] < latest_slot].copy()
+    if len(baseline) == 0:
+        current["anomaly_score"] = (current["deny_rate"] * 100).round(1)
+        current["z_events"] = 0.0
+        return current.sort_values("anomaly_score", ascending=False)
+
+    base_stats = (
+        baseline.groupby("src_ip", as_index=False)
+                .agg(med_events=("events", "median"), mad_events=("events", lambda s: float(np.median(np.abs(s - np.median(s))))),
+                     med_deny=("deny_rate", "median"))
+    )
+    current = current.merge(base_stats, on="src_ip", how="left")
+    current["mad_events"] = current["mad_events"].replace(0, np.nan)
+    current["z_events"] = ((current["events"] - current["med_events"]) / (1.4826 * current["mad_events"]))
+    current["z_events"] = current["z_events"].replace([np.inf, -np.inf], np.nan).fillna(0)
+
+    current["anomaly_score"] = (
+        50 * np.clip(current["z_events"], 0, 5) / 5
+        + 30 * np.clip(current["deny_rate"], 0, 1)
+        + 10 * np.clip(current["uniq_ports"] / 20, 0, 1)
+        + 10 * np.clip(current["sensitive"] / current["events"].replace(0, np.nan).fillna(1), 0, 1)
+    )
+    current["anomaly_score"] = current["anomaly_score"].clip(0, 100).round(1)
+
+    out = current.sort_values(["anomaly_score", "events"], ascending=[False, False]).reset_index(drop=True)
+    return out
+
+
+def section_ip_anomaly_detection(df: pd.DataFrame, top_n: int):
+    st.markdown('<div class="section-label">DÉTECTION D’ANOMALIES IP · FENÊTRE HORAIRE COURANTE</div>', unsafe_allow_html=True)
+    anom = compute_ip_anomalies(df)
+    if len(anom) == 0:
+        st.info("Données insuffisantes pour calculer les anomalies IP.")
+        return anom
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("IP ANALYSÉES", f"{len(anom):,}")
+    c2.metric("ANOMALIES > 70", f"{int((anom['anomaly_score'] >= 70).sum()):,}")
+    c3.metric("SLOT COURANT", str(pd.to_datetime(anom['hour_slot'].iloc[0]).strftime('%Y-%m-%d %H:%M')))
+
+    top_a = anom.head(max(int(top_n), 12)).copy()
+    fig = go.Figure(go.Bar(
+        x=top_a["anomaly_score"],
+        y=top_a["src_ip"],
+        orientation="h",
+        marker=dict(color=top_a["anomaly_score"], colorscale="Reds", cmin=0, cmax=100),
+        customdata=np.stack([top_a["events"], (top_a["deny_rate"] * 100).round(1)], axis=-1),
+        hovertemplate="IP: %{y}<br>Score anomalie: %{x:.1f}<br>Events: %{customdata[0]:,}<br>DENY%: %{customdata[1]:.1f}%<extra></extra>",
+    ))
+    lo = plotly_layout(height=340)
+    lo["yaxis"]["autorange"] = "reversed"
+    lo["xaxis"]["range"] = [0, 100]
+    fig.update_layout(**lo)
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.dataframe(
+        df_for_display(top_a[["src_ip", "anomaly_score", "events", "deny", "deny_rate", "uniq_ports", "sensitive", "z_events"]]),
+        use_container_width=True,
+        height=260,
+    )
+
+    register_chart("Détection anomalies IP", {
+        "slot": str(top_a["hour_slot"].iloc[0]) if len(top_a) else "—",
+        "n_ips": int(len(anom)),
+        "n_anom_gt70": int((anom["anomaly_score"] >= 70).sum()),
+        "top10": anom.head(10)[["src_ip", "anomaly_score", "events", "deny_rate"]].to_dict(orient="records"),
+    })
+    return anom
+
+
+def compute_drift_context(df: pd.DataFrame, recent_days: int = 7, baseline_days: int = 28) -> dict:
+    if len(df) == 0:
+        return {}
+
+    work = df.copy()
+    work["event_time"] = _resolve_event_time(work)
+    work = work.dropna(subset=["event_time"])
+    if len(work) == 0:
+        return {}
+
+    max_dt = work["event_time"].max()
+    recent_start = max_dt - pd.Timedelta(days=recent_days)
+    baseline_start = recent_start - pd.Timedelta(days=baseline_days)
+
+    recent = work[(work["event_time"] > recent_start) & (work["event_time"] <= max_dt)].copy()
+    baseline = work[(work["event_time"] > baseline_start) & (work["event_time"] <= recent_start)].copy()
+
+    if len(recent) == 0 or len(baseline) == 0:
+        return {}
+
+    def _dist(frame: pd.DataFrame, col: str, top: int = 12):
+        s = frame[col].astype(str).fillna("NA")
+        return s.value_counts(normalize=True).head(top)
+
+    rows = []
+    for col in ["action", "PROTO", "dport"]:
+        if col not in work.columns:
+            continue
+        dist_recent = _dist(recent, col)
+        dist_base = _dist(baseline, col)
+        keys = sorted(set(dist_recent.index).union(set(dist_base.index)))
+        for k in keys:
+            r = float(dist_recent.get(k, 0.0))
+            b = float(dist_base.get(k, 0.0))
+            rows.append({
+                "dimension": col,
+                "modalite": str(k),
+                "recent_pct": round(r * 100, 2),
+                "baseline_pct": round(b * 100, 2),
+                "delta_pp": round((r - b) * 100, 2),
+                "abs_delta": abs(r - b),
+            })
+
+    drift_df = pd.DataFrame(rows)
+    if len(drift_df) == 0:
+        return {}
+
+    global_index = float(drift_df["abs_delta"].mean() * 100)
+    return {
+        "recent_n": int(len(recent)),
+        "baseline_n": int(len(baseline)),
+        "recent_window": f"{recent_start.date()} → {max_dt.date()}",
+        "baseline_window": f"{baseline_start.date()} → {recent_start.date()}",
+        "global_drift_index": round(global_index, 2),
+        "drift_df": drift_df.sort_values("abs_delta", ascending=False).reset_index(drop=True),
+    }
+
+
+def section_drift_dashboard(df: pd.DataFrame):
+    st.markdown('<div class="section-label">DRIFT DASHBOARD · BASELINE VS FENÊTRE RÉCENTE</div>', unsafe_allow_html=True)
+    ctx = compute_drift_context(df)
+    if not ctx:
+        st.info("Drift non calculable (historique insuffisant).")
+        return ctx
+
+    drift_df = ctx["drift_df"]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("DRIFT INDEX", f"{ctx['global_drift_index']:.2f}")
+    c2.metric("N RÉCENT", f"{ctx['recent_n']:,}")
+    c3.metric("N BASELINE", f"{ctx['baseline_n']:,}")
+
+    st.caption(f"Fenêtre récente: {ctx['recent_window']} · Baseline: {ctx['baseline_window']}")
+
+    top_drift = drift_df.head(15).copy()
+    fig = go.Figure(go.Bar(
+        x=top_drift["delta_pp"],
+        y=top_drift["dimension"] + " · " + top_drift["modalite"],
+        orientation="h",
+        marker=dict(
+            color=np.where(top_drift["delta_pp"] >= 0, "rgba(0,229,255,0.85)", "rgba(255,23,68,0.85)"),
+        ),
+        hovertemplate="%{y}<br>Δ: %{x:.2f} points<extra></extra>",
+    ))
+    lo = plotly_layout(height=380)
+    lo["yaxis"]["autorange"] = "reversed"
+    fig.update_layout(**lo)
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.dataframe(df_for_display(top_drift[["dimension", "modalite", "recent_pct", "baseline_pct", "delta_pp"]]), use_container_width=True, height=260)
+
+    register_chart("Drift dashboard", {
+        "global_drift_index": ctx["global_drift_index"],
+        "recent_window": ctx["recent_window"],
+        "baseline_window": ctx["baseline_window"],
+        "top10": drift_df.head(10)[["dimension", "modalite", "delta_pp"]].to_dict(orient="records"),
+    })
+    return ctx
+
+
+def section_daily_ai_summary(df: pd.DataFrame, soc_df: pd.DataFrame):
+    st.markdown('<div class="section-label">RÉSUMÉ IA QUOTIDIEN · SOC</div>', unsafe_allow_html=True)
+    if len(df) == 0:
+        st.info("Aucune donnée à résumer.")
+        return
+
+    work = df.copy()
+    work["event_time"] = _resolve_event_time(work)
+    work = work.dropna(subset=["event_time"])
+    if len(work) == 0:
+        st.info("Horodatage indisponible pour produire le résumé quotidien.")
+        return
+
+    work["day"] = work["event_time"].dt.date.astype(str)
+    latest_day = str(work["day"].max())
+    day_df = work[work["day"] == latest_day].copy()
+
+    day_total = int(len(day_df))
+    day_deny = int((day_df["action"] == "DENY").sum()) if "action" in day_df.columns else 0
+    day_deny_pct = (day_deny / day_total * 100) if day_total else 0
+    top_rule = (
+        str(day_df["rule"].value_counts().index[0])
+        if "rule" in day_df.columns and len(day_df["rule"].dropna()) > 0 else "—"
+    )
+    top_port = (
+        int(day_df["dport"].dropna().astype(int).value_counts().index[0])
+        if "dport" in day_df.columns and len(day_df["dport"].dropna()) > 0 else 0
+    )
+
+    top_soc = soc_df.head(3)[["src_ip", "risk_score"]].to_dict(orient="records") if len(soc_df) else []
+    top_soc_txt = ", ".join([f"{x['src_ip']} ({x['risk_score']})" for x in top_soc]) if top_soc else "N/A"
+
+    st.markdown(
+        "\n".join([
+            f"- Jour analysé: **{latest_day}**",
+            f"- Volume: **{day_total:,}** événements · DENY: **{day_deny:,}** ({day_deny_pct:.1f}%)",
+            f"- Règle dominante: **{top_rule}** · Port dominant: **{top_port}**",
+            f"- IP les plus risquées: **{top_soc_txt}**",
+        ])
+    )
+
+    ctx = {
+        "latest_day": latest_day,
+        "day_total": day_total,
+        "day_deny": day_deny,
+        "day_deny_pct": round(day_deny_pct, 2),
+        "top_rule": top_rule,
+        "top_port": top_port,
+        "top_soc": top_soc,
+    }
+
+    register_chart("Résumé IA quotidien", ctx)
+
+    api_key = _get_api_key()
+    if not api_key:
+        st.caption("Clé Mistral absente: résumé statistique local affiché (sans génération IA).")
+        return
+
+    with st.expander("🧠 Générer le résumé quotidien IA", expanded=False):
+        prompt = (
+            "Tu es analyste SOC. Rédige un brief quotidien en français en 4 sections: "
+            "1) Situation du jour, 2) Risques prioritaires, 3) Hypothèses d’attaque plausibles, "
+            "4) Actions immédiates (4 points max). "
+            "Utilise uniquement les chiffres fournis.\n\n"
+            f"CONTEXTE JSON:\n{json.dumps(ctx, ensure_ascii=False, indent=2)}"
+        )
+        if st.button("🚀 Générer résumé IA quotidien", use_container_width=True, key="btn_daily_ai"):
+            with st.spinner("Génération IA en cours..."):
+                try:
+                    out = _call_mistral(api_key, prompt)
+                    st.markdown(out)
+                    st.download_button("⬇️ Télécharger le brief quotidien", out.encode("utf-8"), "brief_ia_quotidien.txt", "text/plain", use_container_width=True)
+                except Exception as e:
+                    st.error(f"Erreur Mistral : {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -856,6 +1456,13 @@ def main():
 
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
+    # ── Nouvelles fonctionnalités prioritaires ─────────────────────────
+    soc_df = section_soc_risk_unified(df, top_n)
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    section_daily_ai_summary(df, soc_df)
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
     # ── Graphiques ───────────────────────────────────────────────────────
     section_timeline_proto(df, top_n, n_total)
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
@@ -863,13 +1470,11 @@ def main():
     section_top_ip_ports(df, top_n, n_total)
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
+    section_ports_entrants_journee(df, top_n, n_total)
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
     section_heatmap_heure_jour(df, n_total)
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-    section_heatmap_port_proto(df, top_n, n_total)
-    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-    section_deny_par_regle(df, top_n, n_total)
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
     # ── Cartes ───────────────────────────────────────────────────────────

@@ -387,7 +387,11 @@ def _force_no_pyarrow_strings(df: pd.DataFrame) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════
 @st.cache_data
 def load_data():
-    data_path = "data/logs_export.csv"
+    candidate_paths = [
+        "data/cleaned_logs.csv",
+        "data/logs_export.csv",
+    ]
+    data_path = next((p for p in candidate_paths if Path(p).exists()), candidate_paths[-1])
 
     def _read_logs_dataframe(path: str) -> pd.DataFrame:
         p = Path(path)
@@ -416,10 +420,10 @@ def load_data():
         cols_l = {c.lower().strip(): c for c in df.columns}
         mapping = {
             "timestamp":     ["timestamp","date","datetime","time"],
-            "src_ip":        ["src_ip","src","source_ip","saddr"],
-            "dst_ip":        ["dst_ip","dst","dest_ip","daddr"],
+            "src_ip":        ["src_ip","src","source_ip","saddr","ipsrc"],
+            "dst_ip":        ["dst_ip","dst","dest_ip","daddr","ipdst"],
             "protocole":     ["protocole","protocol","proto"],
-            "dport":         ["dport","dst_port","dest_port","dpt"],
+            "dport":         ["dport","dstport","dst_port","dest_port","dpt"],
             "action":        ["action","verdict"],
             "rule":          ["rule","ruleid","rule_id","policyid"],
             "interface_in":  ["interface_in","in","iface_in","interface"],
@@ -444,7 +448,7 @@ def load_data():
 
         if "timestamp" in df.columns:
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-            df = df[(df["timestamp"] >= "2025-11-01") & (df["timestamp"] < "2026-03-01")]
+            df = df[df["timestamp"].notna()].copy()
             df["date_jour"]    = df["timestamp"].dt.date.astype(str)  # ✅ string
             df["heure"]        = df["timestamp"].dt.hour
             df["mois"]         = df["timestamp"].dt.to_period("M").astype(str)

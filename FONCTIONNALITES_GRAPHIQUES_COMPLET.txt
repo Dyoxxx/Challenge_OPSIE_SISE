@@ -1,0 +1,213 @@
+OPSIE SISE — GUIDE EXPLICATIF DES FONCTIONNALITÉS ET DES GRAPHIQUES
+===================================================================
+
+1) Ce que fait l’application, simplement
+----------------------------------------
+L’application OPSIE sert à analyser des logs de pare-feu pour répondre à trois questions concrètes :
+qu’est-ce qui se passe sur le réseau, qu’est-ce qui est potentiellement risqué, et quelles actions
+un analyste peut prendre rapidement.
+
+Elle est organisée en trois pages :
+- une page d’accueil qui présente le projet et les indicateurs clés,
+- une page d’analyses opérationnelles pour le pilotage SOC,
+- une page ML pour segmenter automatiquement les comportements réseau.
+
+
+2) Les mécanismes communs à toute l’application
+-----------------------------------------------
+Le chargement des données est robuste : l’application lit en priorité le fichier
+data/logs_export.csv, détecte automatiquement si le contenu est en CSV ou en Parquet,
+et bascule en mode démo si le fichier n’est pas exploitable.
+
+Les colonnes sont harmonisées pour garder un format stable (date, IP source/destination,
+protocole, port, action, règle). Ensuite, des colonnes temporelles sont ajoutées
+(jour, heure, mois, jour de semaine) afin de faciliter l’analyse.
+
+Un système de filtres est disponible dans la barre latérale sur toutes les pages
+(période, action, protocole, plage de ports, règles, top N). Cela permet d’expliquer
+les résultats en contexte, par exemple “sur ce mois précis et sur tel groupe de ports”.
+
+L’intégration IA avec Mistral est sécurisée : la clé API peut venir de
+.streamlit/secrets.toml ou de la variable d’environnement MISTRAL_API_KEY.
+Si la clé est absente, l’application continue de fonctionner sans planter.
+
+
+3) Page Accueil : rôle et lecture
+---------------------------------
+La page d’accueil pose le cadre. Elle rappelle l’objectif de la plateforme,
+résume les deux parcours (Analyses et ML), et affiche trois indicateurs rapides :
+nombre total d’événements, nombre de DENY et nombre de PERMIT.
+
+Cette page n’a pas vocation à faire de l’investigation détaillée.
+Elle sert surtout à introduire la démonstration à un interlocuteur.
+
+
+4) Page Analyses opérationnelles : ce que l’on peut expliquer
+-------------------------------------------------------------
+Cette page est orientée SOC terrain. Elle combine des indicateurs de volume,
+des vues de répartition, des cartes et des modules de priorisation.
+
+4.1 KPIs de pilotage
+Les premiers KPIs donnent une vue immédiate de la situation : volume total,
+part de trafic bloqué, part autorisée, et nombre d’IP sources uniques.
+
+4.2 Score de risque SOC unifié (nouveau)
+Le score SOC attribue à chaque IP source une note de 0 à 100.
+Cette note combine plusieurs signaux : taux de DENY, exposition aux ports sensibles,
+diversité des ports ciblés, activité nocturne et caractère “nouveau” de l’IP.
+
+Le calcul exact utilisé dans l’application est le suivant :
+Score = 40 × deny_rate
+	+ 22 × min(1, sensitive_rate × 2.2)
+	+ 16 × min(1, uniq_ports / 20)
+	+ 12 × min(1, night_rate × 2)
+	+ 10 × is_new_ip
+
+Ensuite, le score est borné entre 0 et 100, puis arrondi à 1 décimale.
+
+Pour clarifier les termes :
+- deny_rate = deny / events
+- sensitive_rate = sensitive_hits / events
+- night_rate = night_hits / events
+- uniq_ports = nombre de ports destination différents vus pour l’IP
+- is_new_ip = 1 si l’IP est apparue pour la première fois dans les 7 derniers jours, sinon 0
+
+La sévérité affichée est ensuite déduite du score :
+- LOW : score ≤ 35
+- MEDIUM : 35 < score ≤ 60
+- HIGH : 60 < score ≤ 80
+- CRITICAL : score > 80
+
+Le résultat est présenté sous forme de graphique horizontal (top IP à risque)
+et d’un tableau détaillé. Une sévérité textuelle est aussi fournie
+(LOW, MEDIUM, HIGH, CRITICAL) pour faciliter le tri des alertes.
+
+4.3 Détection d’anomalies IP (nouveau)
+Ce module compare l’activité de la fenêtre horaire courante au comportement habituel de chaque IP.
+Il utilise une baseline robuste (médiane + MAD) et calcule un score d’anomalie de 0 à 100.
+
+Une IP monte dans le classement si elle produit un pic de volume, un fort taux de DENY,
+une diversité inhabituelle de ports ou des accès sur des ports sensibles.
+L’analyste obtient un top anomalies + un tableau de diagnostic.
+
+4.4 Résumé IA quotidien (nouveau)
+Ce bloc génère d’abord un résumé local du dernier jour disponible
+(volume, DENY%, règle dominante, port dominant, top IP risquées, top IP anormales).
+
+Si une clé Mistral est présente, l’utilisateur peut produire un brief quotidien
+en langage naturel, structuré et exportable en texte.
+
+4.5 Timeline DENY vs PERMIT
+Cette visualisation montre l’évolution journalière du trafic bloqué et autorisé.
+Elle permet d’identifier visuellement des pics ou des ruptures d’activité.
+
+4.6 Distribution des protocoles
+Le graphique met en évidence les protocoles dominants.
+Il est utile pour expliquer la “nature” du trafic observé sur la période filtrée.
+
+4.7 Top IP bloquées et Top ports destination
+Ces deux graphes classent les IP sources les plus bloquées et les ports les plus sollicités.
+Ils servent à prioriser rapidement l’investigation.
+
+4.8 Heatmap Heure × Jour
+La heatmap indique à quels moments l’activité est la plus forte.
+Elle est très pratique pour repérer des patterns nocturnes ou week-end.
+
+4.9 Heatmap Ports × Protocoles
+Cette vue montre les combinaisons ports/protocoles les plus fréquentes.
+Elle aide à repérer des signatures de trafic atypiques.
+
+4.10 DENY par règle firewall
+Ce graphique montre quelles règles concentrent les blocages.
+Il peut guider une revue de politique de filtrage.
+
+4.11 Cartographie géographique
+La cartographie présente l’origine géographique des IP sources,
+avec trois angles : volume total par pays, IP bloquées en bubble map,
+et taux de DENY par pays.
+
+4.12 Table et export
+La page inclut une table des événements filtrés et un export CSV.
+Cela permet de documenter précisément un résultat ou de le réutiliser hors application.
+
+4.13 IA sidebar d’interprétation
+Chaque graphique important enregistre son contexte.
+L’utilisateur peut sélectionner un graphique et demander à l’IA
+un résumé, une analyse complète ou des recommandations sécurité.
+
+
+5) Page ML & Interprétation : ce qu’il faut expliquer
+-----------------------------------------------------
+Cette page construit une typologie automatique des événements firewall.
+Elle combine une réduction de dimension (ACP) et un clustering (KMeans).
+
+5.1 Préparation des variables
+Le pipeline utilise toutes les variables exploitables :
+- variables numériques/bool normalisées,
+- variables catégorielles de faible cardinalité en one-hot,
+- variables catégorielles de forte cardinalité (comme certaines IP) encodées en fréquence.
+
+5.2 ACP (Analyse en composantes principales)
+L’ACP projette les événements en 2 dimensions (PC1, PC2)
+pour visualiser les proximités de comportement.
+La variance expliquée est affichée pour qualifier la qualité de projection.
+
+5.3 KMeans
+KMeans segmente les événements en K groupes (K réglable).
+Le score de silhouette complète l’analyse en donnant un indicateur
+de séparation des clusters.
+
+5.4 Profil des clusters
+Pour chaque cluster, l’application présente la taille, le DENY%,
+les ports dominants, les règles dominantes et les protocoles dominants.
+Cette lecture transforme un résultat ML en message opérationnel compréhensible.
+
+5.5 Interprétation IA des résultats ML
+Un module Mistral peut générer un commentaire automatique
+à partir d’un contexte JSON (K, silhouette, variance, profils).
+Le texte est exportable pour un rapport.
+
+5.6 Export ML
+L’échantillon clusterisé peut être exporté en CSV,
+ce qui facilite la traçabilité et la validation hors interface.
+
+
+6) Liste des graphiques disponibles
+-----------------------------------
+Sur la page Analyses :
+1. Timeline DENY vs PERMIT
+2. Distribution des Protocoles
+3. Top IP Sources Bloquées
+4. Top Ports Destination
+5. Heatmap Heure × Jour
+6. Heatmap Ports × Protocoles
+7. DENY par Règle Firewall
+8. Carte Volume par Pays
+9. Carte Bubble IP Bloquées
+10. Carte Taux DENY par Pays
+11. Score SOC unifié
+12. Détection anomalies IP
+
+Sur la page ML :
+14. Projection ACP 2D avec clusters KMeans
+15. Tableau de profil des clusters
+
+
+7) Exports disponibles
+----------------------
+L’application permet d’exporter :
+- les données filtrées de la page Analyses (CSV),
+- les analyses IA de la sidebar (TXT),
+- le brief IA quotidien (TXT),
+- l’échantillon clusterisé ML (CSV),
+- le rapport IA ML (TXT).
+
+
+8) Valeur ajoutée métier
+------------------------
+Le principal bénéfice est la transformation de logs bruts en décisions actionnables.
+Le score unifié aide à prioriser les IP à traiter, l’anomalie IP détecte les écarts
+en quasi temps réel, et l’IA facilite la communication des résultats auprès d’un décideur non technique.
+
+En pratique, cette combinaison permet à la fois l’analyse, la priorisation,
+et la restitution claire des risques sécurité.

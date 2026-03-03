@@ -10,7 +10,7 @@ services:
     environment:
       - STREAMLIT_SERVER_ADDRESS=0.0.0.0
       - STREAMLIT_SERVER_PORT=8501
-      - MISTRAL_API_KEY=${MISTRAL_API_KEY:?MISTRAL_API_KEY is required}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
     volumes:
       - ./data:/app/data
     restart: unless-stopped  
